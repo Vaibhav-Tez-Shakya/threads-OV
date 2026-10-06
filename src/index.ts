@@ -1,4 +1,4 @@
-import dotenv from "dotenv";
+﻿import dotenv from "dotenv";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -279,10 +279,15 @@ async function startHttp() {
     }
   });
 
-  httpServer.listen(port, host, () => {
-    console.error(
-      `Threads-OV MCP HTTP server listening at http://${host}:${port}/mcp`,
-    );
+  await new Promise<void>((resolve, reject) => {
+    httpServer.once("error", reject);
+
+    httpServer.listen(port, host, () => {
+      console.error(
+        `Threads-OV MCP HTTP server listening at http://${host}:${port}/mcp`,
+      );
+      resolve();
+    });
   });
 }
 
@@ -293,4 +298,5 @@ if (process.env.MCP_TRANSPORT === "http") {
 } else {
   await startStdio();
 }
+
 
