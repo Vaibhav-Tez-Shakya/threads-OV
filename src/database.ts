@@ -1,4 +1,4 @@
-﻿import dotenv from "dotenv";
+import dotenv from "dotenv";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
@@ -35,6 +35,32 @@ export interface ThreadMessage {
   created_at: Date;
 }
 
+export async function initializeDatabase(): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS threads (
+      id UUID PRIMARY KEY,
+      title TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS thread_messages (
+      id UUID PRIMARY KEY,
+      thread_id UUID NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_thread_messages_thread_id_created_at
+      ON thread_messages(thread_id, created_at);
+
+    CREATE INDEX IF NOT EXISTS idx_threads_updated_at
+      ON threads(updated_at DESC);
+  `);
+
+  console.error("Database schema initialized successfully.");
+}
 export async function testDatabaseConnection(): Promise<void> {
   const result = await pool.query(
     "SELECT current_database(), current_user, version()",

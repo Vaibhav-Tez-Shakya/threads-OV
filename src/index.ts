@@ -1,4 +1,4 @@
-﻿import dotenv from "dotenv";
+import dotenv from "dotenv";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -11,6 +11,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 
 import {
   createThread,
+  initializeDatabase,
   getThread,
   listThreads,
   saveMessage,
@@ -291,6 +292,7 @@ async function startHttp() {
   });
 }
 
+await initializeDatabase();
 await testDatabaseConnection();
 
 if (process.env.MCP_TRANSPORT === "http") {
