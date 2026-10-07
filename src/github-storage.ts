@@ -52,6 +52,31 @@ interface GitHubFile {
   content?: string;
 }
 
+class GitHubApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly rateLimitRemaining?: string,
+    readonly rateLimitReset?: string,
+    readonly retryAfter?: string,
+  ) {
+    super(message);
+    this.name = "GitHubApiError";
+  }
+}
+
+function isNotFound(error: unknown): boolean {
+  return error instanceof GitHubApiError && error.status === 404;
+}
+
+function isTransientServerError(error: unknown): error is GitHubApiError {
+  return error instanceof GitHubApiError && [500, 502, 503, 504].includes(error.status);
+}
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 function headers(): Record<string, string> {
   return {
     Accept: "application/vnd.github+json",
@@ -115,22 +140,73 @@ async function githubRequest<T>(
   url: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      ...headers(),
-      ...(options.headers ?? {}),
-    },
-  });
+  const isRead = (options.method ?? "GET").toUpperCase() === "GET";
+  const maxReadAttempts = 3;
 
-  if (!response.ok) {
+  for (let attempt = 1; ; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        ...options,
+        headers: {
+          ...headers(),
+          ...(options.headers ?? {}),
+        },
+      });
+    } catch (error) {
+      if (isRead && attempt < maxReadAttempts) {
+        await wait(500 * 2 ** (attempt - 1));
+        continue;
+      }
+      throw new Error(`GitHub API network request failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    if (response.ok) {
+      return (await response.json()) as T;
+    }
+
     const body = await response.text();
-    throw new Error(
-      `GitHub API request failed (${response.status}): ${body}`,
+    const remaining = response.headers.get("x-ratelimit-remaining") ?? undefined;
+    const reset = response.headers.get("x-ratelimit-reset") ?? undefined;
+    const retryAfter = response.headers.get("retry-after") ?? undefined;
+    const rateLimited =
+      response.status === 429 ||
+      (response.status === 403 &&
+        (remaining === "0" || /rate limit|secondary rate limit/i.test(body)));
+    const resetTime = reset && Number.isFinite(Number(reset))
+      ? new Date(Number(reset) * 1000).toISOString()
+      : undefined;
+    const resetDescription = resetTime
+      ? ` Rate limit resets at ${resetTime}.`
+      : "";
+    const retryDescription = retryAfter
+      ? ` Retry after ${retryAfter} seconds.`
+      : "";
+    const headerDetails = [
+      remaining ? `x-ratelimit-remaining=${remaining}` : undefined,
+      reset ? `x-ratelimit-reset=${reset}` : undefined,
+      retryAfter ? `retry-after=${retryAfter}` : undefined,
+    ].filter(Boolean).join(", ");
+    const statusText = body || response.statusText || "No response body";
+    const diagnostic = rateLimited
+      ? ` GitHub rate limit reached.${retryDescription}${resetDescription}`
+      : "";
+    const apiError = new GitHubApiError(
+      response.status,
+      `GitHub API request failed (${response.status}): ${statusText}.${diagnostic}${headerDetails ? ` Response headers: ${headerDetails}.` : ""}`,
+      remaining,
+      reset,
+      retryAfter,
     );
-  }
 
-  return (await response.json()) as T;
+    // GETs are safe to retry. Writes are reconciled by putFile so a request
+    // that succeeded despite a 5xx response cannot create duplicate commits.
+    if (isRead && isTransientServerError(apiError) && attempt < maxReadAttempts) {
+      await wait(500 * 2 ** (attempt - 1));
+      continue;
+    }
+    throw apiError;
+  }
 }
 
 function encodePath(pathValue: string): string {
@@ -298,14 +374,40 @@ async function putFile(
     branch,
   };
 
-  if (sha) {
-    body.sha = sha;
-  }
+  let expectedSha = sha;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    if (expectedSha) body.sha = expectedSha;
+    else delete body.sha;
 
-  await githubRequest(url, {
-    method: "PUT",
-    body: JSON.stringify(body),
-  });
+    try {
+      await githubRequest(url, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      });
+      return;
+    } catch (error) {
+      if (!isTransientServerError(error)) throw error;
+
+      // A 5xx can arrive after GitHub committed the write. Read the file
+      // before retrying to avoid duplicate or conflicting content writes.
+      await wait(1000 * attempt);
+      let current: { file: GitHubFile; markdown: string } | undefined;
+      try {
+        current = await getFile(filePath);
+      } catch (readError) {
+        if (!isNotFound(readError)) {
+          throw new Error(`${error.message} Could not verify whether the write completed: ${readError instanceof Error ? readError.message : String(readError)}`);
+        }
+      }
+
+      if (current?.markdown === content) return;
+      if (current && (!expectedSha || current.file.sha !== expectedSha)) {
+        throw new Error(`${error.message} The file changed while the write was being checked; no retry was attempted to avoid overwriting it.`);
+      }
+      if (attempt === 2) throw error;
+      expectedSha = current?.file.sha ?? expectedSha;
+    }
+  }
 }
 
 export async function initializeDatabase(): Promise<void> {
@@ -477,5 +579,6 @@ export async function listDocuments(): Promise<string[]> {
 export async function closeDatabase(): Promise<void> {
   console.error("GitHub Markdown storage does not require connection cleanup.");
 }
+
 
 
