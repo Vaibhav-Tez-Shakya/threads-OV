@@ -7,7 +7,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx src/index.ts"
+    "dev": "tsx src/index.ts",
+    "sync:render": "tsx src/sync-render-to-local.ts"
   },
   "keywords": [],
   "author": "",
@@ -16,12 +17,10 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
     "dotenv": "^18.0.5",
-    "pg": "^8.23.1",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/node": "^26.6.4",
-    "@types/pg": "^8.23.1",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   }

@@ -1,4 +1,4 @@
-import dotenv from "dotenv";
+﻿import dotenv from "dotenv";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -16,7 +16,7 @@ import {
   listThreads,
   saveMessage,
   testDatabaseConnection,
-} from "./database.js";
+} from "./github-storage.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -300,5 +300,6 @@ if (process.env.MCP_TRANSPORT === "http") {
 } else {
   await startStdio();
 }
+
 
 
