@@ -61,8 +61,54 @@ function headers(): Record<string, string> {
   };
 }
 
-function threadFilePath(threadId: string): string {
+const conversationsPath = `${threadsPath}/conversations`;
+const documentsPath = `${threadsPath}/documents`;
+
+function safeMarkdownName(value: string, fallback: string): string {
+  const cleaned = value
+    .normalize("NFKC")
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/[. ]+$/g, "")
+    .trim();
+  const safe = cleaned.replace(/^\.+$/, "").slice(0, 120).trim();
+  return safe || fallback;
+}
+
+function legacyThreadFilePath(threadId: string): string {
   return `${threadsPath}/${threadId}.md`;
+}
+
+async function listMarkdownFiles(folderPath: string): Promise<Array<{ name: string; path: string; sha: string }>> {
+  const url =
+    `${GITHUB_API_BASE}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}` +
+    `/contents/${encodePath(folderPath)}?ref=${encodeURIComponent(branch)}`;
+  const files = await githubRequest<Array<{ name: string; path: string; sha: string; type: string }>>(url);
+  return files.filter((file) => file.type === "file" && file.name.toLowerCase().endsWith(".md"));
+}
+
+async function findThreadFile(threadId: string): Promise<string> {
+  try {
+    const candidates = await listMarkdownFiles(conversationsPath);
+    for (const candidate of candidates) {
+      const { markdown } = await getFile(candidate.path);
+      const storedId = markdown.match(/^- Thread ID: (.+)$/m)?.[1]?.trim();
+      if (storedId === threadId) return candidate.path;
+    }
+  } catch (error) {
+    // An absent conversations directory is expected before the first new save.
+    if (!(error instanceof Error) || !error.message.includes("GitHub API request failed (404)")) throw error;
+  }
+
+  const legacyPath = legacyThreadFilePath(threadId);
+  try {
+    const { markdown } = await getFile(legacyPath);
+    const storedId = markdown.match(/^- Thread ID: (.+)$/m)?.[1]?.trim();
+    if (storedId === threadId) return legacyPath;
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("GitHub API request failed (404)")) throw error;
+  }
+  throw new Error(`Thread not found: ${threadId}`);
 }
 
 async function githubRequest<T>(
@@ -298,9 +344,20 @@ export async function createThread(
   };
 
   const content = renderMarkdown(thread, []);
+  const titleForFile = safeMarkdownName(title ?? "Untitled Thread", "Untitled Thread");
+  let filePath = `${conversationsPath}/${titleForFile}.md`;
+
+  try {
+    const existing = await listMarkdownFiles(conversationsPath);
+    if (existing.some((file) => file.name.toLowerCase() === `${titleForFile}.md`.toLowerCase())) {
+      filePath = `${conversationsPath}/${titleForFile} - ${id.slice(0, 8)}.md`;
+    }
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("GitHub API request failed (404)")) throw error;
+  }
 
   await putFile(
-    threadFilePath(id),
+    filePath,
     content,
     `Create thread ${id}`,
   );
@@ -314,7 +371,8 @@ export async function saveMessage(
   role: string,
   content: string,
 ): Promise<ThreadMessage> {
-  const { file, markdown } = await getFile(threadFilePath(threadId));
+  const filePath = await findThreadFile(threadId);
+  const { file, markdown } = await getFile(filePath);
 
   const stored = parseMarkdown(markdown, threadId);
 
@@ -335,7 +393,7 @@ export async function saveMessage(
   );
 
   await putFile(
-    threadFilePath(threadId),
+    filePath,
     updatedMarkdown,
     `Save ${role} message ${id} to thread ${threadId}`,
     file.sha,
@@ -347,38 +405,32 @@ export async function saveMessage(
 export async function getThread(
   threadId: string,
 ): Promise<{ thread: Thread; messages: ThreadMessage[] }> {
-  const { markdown } = await getFile(threadFilePath(threadId));
+  const { markdown } = await getFile(await findThreadFile(threadId));
 
   return parseMarkdown(markdown, threadId);
 }
 
 export async function listThreads(): Promise<Thread[]> {
-  const url =
-    `${GITHUB_API_BASE}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}` +
-    `/contents/${encodePath(threadsPath)}?ref=${encodeURIComponent(branch)}`;
-
-  const files = await githubRequest<
-    Array<{
-      name: string;
-      type: string;
-    }>
-  >(url);
-
-  const markdownFiles = files.filter(
-    (file) => file.type === "file" && file.name.endsWith(".md"),
-  );
+  const markdownFiles = [
+    ...(await listMarkdownFiles(conversationsPath).catch((error) => {
+      if (error instanceof Error && error.message.includes("GitHub API request failed (404)")) return [];
+      throw error;
+    })),
+    ...(await listMarkdownFiles(threadsPath)),
+  ];
 
   const threads: Thread[] = [];
 
   for (const file of markdownFiles) {
-    const threadId = file.name.replace(/\.md$/, "");
-
     try {
-      const { thread } = await getThread(threadId);
+      const { markdown } = await getFile(file.path);
+      const stored = parseMarkdown(markdown, file.name.replace(/\.md$/, ""));
+      const { thread } = stored;
+      if (threads.some((item) => item.id === thread.id)) continue;
       threads.push(thread);
     } catch (error) {
       console.error(
-        `Unable to read thread ${threadId}:`,
+        `Unable to read thread file ${file.path}:`,
         error,
       );
     }
@@ -387,6 +439,39 @@ export async function listThreads(): Promise<Thread[]> {
   return threads.sort(
     (a, b) => b.updated_at.getTime() - a.updated_at.getTime(),
   );
+}
+
+export async function saveDocument(name: string, content: string): Promise<{ name: string; path: string }> {
+  const safeName = safeMarkdownName(name.replace(/\.md$/i, ""), "Untitled Document");
+  const filePath = `${documentsPath}/${safeName}.md`;
+  let sha: string | undefined;
+
+  try {
+    const { file } = await getFile(filePath);
+    sha = file.sha;
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("GitHub API request failed (404)")) throw error;
+  }
+
+  await putFile(filePath, content, `Save document ${safeName}`, sha);
+  return { name: `${safeName}.md`, path: filePath };
+}
+
+export async function getDocument(name: string): Promise<{ name: string; content: string }> {
+  const safeName = safeMarkdownName(name.replace(/\.md$/i, ""), "Untitled Document");
+  const filePath = `${documentsPath}/${safeName}.md`;
+  const { markdown } = await getFile(filePath);
+  return { name: `${safeName}.md`, content: markdown };
+}
+
+export async function listDocuments(): Promise<string[]> {
+  try {
+    const files = await listMarkdownFiles(documentsPath);
+    return files.map((file) => file.name).sort((a, b) => a.localeCompare(b));
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("GitHub API request failed (404)")) return [];
+    throw error;
+  }
 }
 
 export async function closeDatabase(): Promise<void> {

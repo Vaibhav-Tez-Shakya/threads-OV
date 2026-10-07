@@ -14,6 +14,9 @@ import {
   initializeDatabase,
   getThread,
   listThreads,
+  saveDocument,
+  getDocument,
+  listDocuments,
   saveMessage,
   testDatabaseConnection,
 } from "./github-storage.js";
@@ -142,6 +145,50 @@ function createMcpServer() {
           },
         ],
       };
+    },
+  );
+
+  server.registerTool(
+    "save_document",
+    {
+      title: "Save Document",
+      description: "Creates or updates a Markdown document in the GitHub archive.",
+      inputSchema: {
+        name: z.string().min(1).describe("Document title or filename."),
+        content: z.string().describe("Complete Markdown document content."),
+      },
+    },
+    async ({ name, content }) => {
+      const document = await saveDocument(name, content);
+      return { content: [{ type: "text", text: JSON.stringify(document, null, 2) }] };
+    },
+  );
+
+  server.registerTool(
+    "get_document",
+    {
+      title: "Get Document",
+      description: "Retrieves a Markdown document from the GitHub archive.",
+      inputSchema: {
+        name: z.string().min(1).describe("Document title or filename."),
+      },
+    },
+    async ({ name }) => {
+      const document = await getDocument(name);
+      return { content: [{ type: "text", text: JSON.stringify(document, null, 2) }] };
+    },
+  );
+
+  server.registerTool(
+    "list_documents",
+    {
+      title: "List Documents",
+      description: "Lists Markdown documents in the GitHub archive.",
+      inputSchema: {},
+    },
+    async () => {
+      const documents = await listDocuments();
+      return { content: [{ type: "text", text: JSON.stringify(documents, null, 2) }] };
     },
   );
 
